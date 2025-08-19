@@ -105,22 +105,8 @@ class ZohoService {
         ]
       };
 
-      // Get available fields from Zoho CRM to check field names
-      try {
-        const metadata = await this.getLeadMetadata();
-        if (metadata && metadata.fields) {
-          // Check which of our fields exist
-          const fieldMappingsKeys = Object.keys(fieldMappings);
-          const missingFields = fieldMappingsKeys.filter(key => 
-            !metadata.fields.some(field => field.api_name === key)
-          );
-          if (missingFields.length > 0) {
-            console.warn(`⚠️ Missing fields in Zoho CRM: ${missingFields.join(', ')}`);
-          }
-        }
-      } catch (error) {
-        console.warn('⚠️ Could not fetch field metadata:', error.message);
-      }
+      // Note: Field validation removed due to OAuth scope mismatch
+      // Fields will be validated by Zoho CRM when the update request is sent
 
       const response = await axios.put(
         `${this.baseURL}/Leads/${leadId}`,
@@ -198,23 +184,15 @@ class ZohoService {
     }
   }
 
-  // Get lead metadata to check field names
-  async getLeadMetadata() {
-    try {
-      const headers = await this.getAuthHeaders();
-      const response = await axios.get(`${this.baseURL}/settings/fields?module=Leads`, { headers });
-      return response.data;
-    } catch (error) {
-      console.error('❌ Error getting lead metadata:', error.response?.data || error.message);
-      return null;
-    }
-  }
 
-  // Map brand overview data to Zoho CRM fields
-  async mapBrandOverviewToFields(brandOverview) {
-    try {
-      // Check if this is an insufficient data response
-      if (brandOverview.insufficientData === true) {
+
+        // Map brand overview data to Zoho CRM fields
+      async mapBrandOverviewToFields(brandOverview) {
+        try {
+          console.log(`🔍 Mapping brand overview to fields for: ${brandOverview.company?.name || 'Unknown company'}`);
+          
+          // Check if this is an insufficient data response
+          if (brandOverview.insufficientData === true) {
         return {
           'Overview': 'DATA_NOT_FOUND_DUE_TO_INCORRECT_COMPANY_NAME_OR_WEBSITE_URL',
           'Product_Services': 'Please enter the correct company name and website URL',
@@ -243,34 +221,118 @@ class ZohoService {
       const analysisData = analysis.analysis || analysis.rawResponse || analysis;
       const geolocationData = geolocation.geolocationAnalysis || geolocation.rawResponse || geolocation;
       
+      console.log(`🔍 Analysis data type: ${typeof analysisData}, Geolocation data type: ${typeof geolocationData}`);
+      
       // Parse the JSON responses from Gemini (they come as strings with markdown)
       let parsedAnalysis, parsedGeolocation;
       
       try {
         if (typeof analysisData === 'string') {
-          parsedAnalysis = JSON.parse(analysisData.replace(/```json\n|\n```/g, ''));
+          // Clean the text by removing markdown formatting
+          let cleanText = analysisData;
+          cleanText = cleanText.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
+          cleanText = cleanText.trim();
+          
+          parsedAnalysis = JSON.parse(cleanText);
         } else {
           parsedAnalysis = analysisData;
         }
       } catch (error) {
         console.error('❌ Error parsing analysis data:', error.message);
-        parsedAnalysis = { overview: 'Analysis parsing failed' };
+        console.error(`Raw analysis data: ${analysisData ? analysisData.substring(0, 200) : 'null'}...`);
+        
+        // Try to extract JSON from markdown formatting with more robust patterns
+        if (typeof analysisData === 'string') {
+          const patterns = [
+            /```json\s*(\{[\s\S]*?\})\s*```/,  // ```json { ... } ```
+            /```\s*(\{[\s\S]*?\})\s*```/,      // ``` { ... } ```
+            /\{[\s\S]*\}/,                      // { ... }
+          ];
+          
+          for (const pattern of patterns) {
+            const jsonMatch = analysisData.match(pattern);
+            if (jsonMatch) {
+              try {
+                parsedAnalysis = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+                console.log('✅ Successfully extracted analysis JSON using pattern:', pattern);
+                break;
+              } catch (extractError) {
+                console.error(`❌ Failed to extract analysis JSON using pattern ${pattern}:`, extractError.message);
+                continue;
+              }
+            }
+          }
+        }
+        
+        // If all parsing attempts failed, use fallback
+        if (!parsedAnalysis) {
+          parsedAnalysis = { overview: 'Analysis parsing failed' };
+        }
       }
       
       try {
         if (typeof geolocationData === 'string') {
-          parsedGeolocation = JSON.parse(geolocationData.replace(/```json\n|\n```/g, ''));
+          // Clean the text by removing markdown formatting
+          let cleanText = geolocationData;
+          cleanText = cleanText.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
+          cleanText = cleanText.trim();
+          
+          parsedGeolocation = JSON.parse(cleanText);
         } else {
           parsedGeolocation = geolocationData;
         }
       } catch (error) {
         console.error('❌ Error parsing geolocation data:', error.message);
-        parsedGeolocation = { 
-          headquarters: 'Not specified',
-          serviceAreas: [],
-          markets: []
-        };
+        console.error(`Raw geolocation data: ${geolocationData ? geolocationData.substring(0, 200) : 'null'}...`);
+        
+        // Try to extract JSON from markdown formatting with more robust patterns
+        if (typeof geolocationData === 'string') {
+          const patterns = [
+            /```json\s*(\{[\s\S]*?\})\s*```/,  // ```json { ... } ```
+            /```\s*(\{[\s\S]*?\})\s*```/,      // ``` { ... } ```
+            /\{[\s\S]*\}/,                      // { ... }
+          ];
+          
+          for (const pattern of patterns) {
+            const jsonMatch = geolocationData.match(pattern);
+            if (jsonMatch) {
+              try {
+                parsedGeolocation = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+                console.log('✅ Successfully extracted geolocation JSON using pattern:', pattern);
+                break;
+              } catch (extractError) {
+                console.error(`❌ Failed to extract geolocation JSON using pattern ${pattern}:`, extractError.message);
+                continue;
+              }
+            }
+          }
+        }
+        
+        // If all parsing attempts failed, use fallback
+        if (!parsedGeolocation) {
+          parsedGeolocation = { 
+            headquarters: 'Not specified',
+            serviceAreas: [],
+            markets: []
+          };
+        }
       }
+      
+      // Helper function to safely handle array fields
+      const safeArrayJoin = (field, separator = ', ') => {
+        if (!field) return '';
+        if (Array.isArray(field) && field.length > 0) {
+          return field.join(separator);
+        }
+        if (typeof field === 'string') {
+          return field;
+        }
+        // Log unexpected field types for debugging
+        if (field !== null && field !== undefined) {
+          console.log(`⚠️ Unexpected field type: ${typeof field}, value: ${JSON.stringify(field).substring(0, 100)}`);
+        }
+        return '';
+      };
       
       // Map to Zoho CRM fields
       const fieldMappings = {};
@@ -281,9 +343,7 @@ class ZohoService {
       }
       
       // Product & Services
-      if (parsedAnalysis.products && parsedAnalysis.products.length > 0) {
-        fieldMappings['Product_Services'] = parsedAnalysis.products.join('\n• ');
-      }
+      fieldMappings['Product_Services'] = safeArrayJoin(parsedAnalysis.products, '\n• ');
       
       // Target Market
       if (parsedAnalysis.targetMarket) {
@@ -321,9 +381,7 @@ class ZohoService {
       }
       
       // Sales Channels
-      if (parsedAnalysis.salesChannels && parsedAnalysis.salesChannels.length > 0) {
-        fieldMappings['Sales_Channels'] = parsedAnalysis.salesChannels.join(', ');
-      }
+      fieldMappings['Sales_Channels'] = safeArrayJoin(parsedAnalysis.salesChannels);
       
       // Company Size
       if (parsedAnalysis.companySize) {
@@ -336,9 +394,7 @@ class ZohoService {
       }
       
       // Decision Makers
-      if (parsedAnalysis.decisionMakers && parsedAnalysis.decisionMakers.length > 0) {
-        fieldMappings['Decision_Makers'] = parsedAnalysis.decisionMakers.join(', ');
-      }
+      fieldMappings['Decision_Makers'] = safeArrayJoin(parsedAnalysis.decisionMakers);
       
       // Marketing Indicators
       if (parsedAnalysis.marketingIndicators) {
@@ -346,9 +402,7 @@ class ZohoService {
       }
       
       // Tech Stack
-      if (parsedAnalysis.techStack && parsedAnalysis.techStack.length > 0) {
-        fieldMappings['Tech_Stack'] = parsedAnalysis.techStack.join(', ');
-      }
+      fieldMappings['Tech_Stack'] = safeArrayJoin(parsedAnalysis.techStack);
       
       // Marketing Budget - Calculate 5% of annual revenue
       if (parsedAnalysis.annualRevenue || parsedAnalysis.onlineRevenue) {
@@ -452,9 +506,7 @@ class ZohoService {
       }
       
       // Recent News & Updates
-      if (parsedAnalysis.recentNews && parsedAnalysis.recentNews.length > 0) {
-        fieldMappings['Recent_News_Updates'] = parsedAnalysis.recentNews.join('\n• ');
-      }
+      fieldMappings['Recent_News_Updates'] = safeArrayJoin(parsedAnalysis.recentNews, '\n• ');
       
       // Website Traffic
       if (parsedAnalysis.websiteTraffic) {
@@ -470,9 +522,13 @@ class ZohoService {
         fieldMappings['Website_Traffic'] = cleanTrafficData;
       }
       
+      // Log the final field mappings for debugging
+      console.log(`✅ Successfully mapped ${Object.keys(fieldMappings).length} fields to Zoho CRM`);
+      
       return fieldMappings;
     } catch (error) {
       console.error('❌ Error mapping brand overview to fields:', error.message);
+      console.error('Brand overview structure:', JSON.stringify(brandOverview, null, 2).substring(0, 500));
       
       // Send Slack notification for field mapping failure
       await slackService.sendErrorNotification(error, {

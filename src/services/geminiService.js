@@ -62,6 +62,7 @@ class GeminiService {
   }
 
   // Enhanced data collection from multiple sources
+  // Note: Reuters and Bloomberg removed due to consistent blocking. Some other sources may fail due to anti-scraping measures - this is expected behavior
   async collectEnhancedData(companyData, scrapedContent) {
     const enhancedData = {
       website: scrapedContent,
@@ -213,12 +214,11 @@ class GeminiService {
   }
 
   // Scrape news articles
+  // Note: Reuters and Bloomberg removed due to consistent 401/403 blocking
   async scrapeNewsArticles(companyName) {
     try {
       const newsData = {
         googleNews: [],
-        reuters: [],
-        bloomberg: [],
         economicTimes: [],    // Indian
         businessStandard: [], // Indian
         livemint: []         // Indian
@@ -233,32 +233,18 @@ class GeminiService {
         // Parse news articles from response
         newsData.googleNews = [{ title: 'Recent news found', url: googleNewsUrl }];
       } catch (error) {
-        console.error(`❌ Error scraping Google News: ${error.message}`);
+        // Google News often blocks scraping attempts - this is expected
+        if (error.response?.status === 401 || error.response?.status === 403) {
+          console.log(`ℹ️ Google News access blocked (expected): ${error.response.status}`);
+        } else {
+          console.error(`❌ Error scraping Google News: ${error.message}`);
+        }
+        newsData.googleNews = [];
       }
 
-      // Reuters (Global)
-      try {
-        const reutersUrl = `https://www.reuters.com/search/news?blob=${encodeURIComponent(companyName)}`;
-        const response = await axios.get(reutersUrl, {
-          timeout: 5000,
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-        });
-        newsData.reuters = [{ title: 'Reuters news search', url: reutersUrl }];
-      } catch (error) {
-        console.error(`❌ Error scraping Reuters: ${error.message}`);
-      }
 
-      // Bloomberg (Global)
-      try {
-        const bloombergUrl = `https://www.bloomberg.com/search?query=${encodeURIComponent(companyName)}`;
-        const response = await axios.get(bloombergUrl, {
-          timeout: 5000,
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-        });
-        newsData.bloomberg = [{ title: 'Bloomberg news search', url: bloombergUrl }];
-      } catch (error) {
-        console.error(`❌ Error scraping Bloomberg: ${error.message}`);
-      }
+
+
 
       return newsData;
     } catch (error) {
@@ -274,8 +260,6 @@ class GeminiService {
     try {
       const financialData = {
         yahooFinance: null,
-        bloomberg: null,
-        reuters: null,
         tofler: null,        // Indian
         moneyControl: null,  // Indian
         screener: null       // Indian
@@ -291,30 +275,6 @@ class GeminiService {
         financialData.yahooFinance = { url: yahooFinanceUrl, available: true };
       } catch (error) {
         financialData.yahooFinance = { available: false };
-      }
-
-      // Bloomberg (Global)
-      try {
-        const bloombergUrl = `https://www.bloomberg.com/quote/${companyName.toUpperCase()}:US`;
-        const response = await axios.get(bloombergUrl, {
-          timeout: 5000,
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-        });
-        financialData.bloomberg = { url: bloombergUrl, available: true };
-      } catch (error) {
-        financialData.bloomberg = { available: false };
-      }
-
-      // Reuters (Global)
-      try {
-        const reutersUrl = `https://www.reuters.com/companies/${companyName.toLowerCase().replace(/\s+/g, '-')}`;
-        const response = await axios.get(reutersUrl, {
-          timeout: 5000,
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-        });
-        financialData.reuters = { url: reutersUrl, available: true };
-      } catch (error) {
-        financialData.reuters = { available: false };
       }
 
       // MoneyControl (Indian financial data)
@@ -517,13 +477,9 @@ class GeminiService {
       const budgetSources = [
         // Check financial data for marketing spend
         enhancedData.financialData?.yahooFinance,
-        enhancedData.financialData?.bloomberg,
-        enhancedData.financialData?.reuters,
         
         // Check news articles for marketing budget mentions
-        enhancedData.newsArticles?.googleNews,
-        enhancedData.newsArticles?.reuters,
-        enhancedData.newsArticles?.bloomberg
+        enhancedData.newsArticles?.googleNews
       ];
 
       // Look for marketing budget in scraped data
@@ -782,32 +738,51 @@ class GeminiService {
   // Estimate traffic using AI based on company characteristics
   async estimateTrafficWithAI(websiteUrl) {
     try {
-      const prompt = `
-        Estimate the monthly website traffic for this domain: ${websiteUrl}
-        
-        Consider factors like:
-        - Company size and industry
-        - Type of business (B2B, B2C, e-commerce, etc.)
-        - Market presence and brand recognition
-        - Typical traffic patterns for similar companies
-        
-        Provide a realistic estimate in one of these formats:
-        - "Under 1K visits/month" (for small/local businesses)
-        - "1K-10K visits/month" (for small-medium businesses)
-        - "10K-100K visits/month" (for medium businesses)
-        - "100K-1M visits/month" (for large businesses)
-        - "1M+ visits/month" (for major brands)
-        
-        Return only the traffic estimate, nothing else.
-      `;
+      // Use a much shorter prompt to avoid context length issues
+      const prompt = `Estimate monthly website traffic for ${websiteUrl}. Return only: "Under 1K", "1K-10K", "10K-100K", "100K-1M", or "1M+" visits/month.`;
 
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text().trim();
+      // Try primary model first
+      try {
+        const result = await this.primaryModel.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text().trim();
+        
+        // Validate the response format
+        if (text && text.length < 50) {
+          return text;
+        }
+      } catch (primaryError) {
+        console.log(`ℹ️ Primary model failed, trying fallback models...`);
+        
+        // Try fallback models if primary fails
+        for (const fallbackModel of this.fallbackModels) {
+          try {
+            const result = await fallbackModel.generateContent(prompt);
+            const response = await result.response;
+            const text = response.text().trim();
+            
+            if (text && text.length < 50) {
+              return text;
+            }
+          } catch (fallbackError) {
+            console.log(`ℹ️ Fallback model failed: ${fallbackError.message}`);
+            continue;
+          }
+        }
+      }
       
-      return text;
+      // If all AI models fail, return a default estimate
+      return 'Not available';
+      
     } catch (error) {
       console.error(`❌ Error estimating traffic with AI: ${error.message}`);
+      
+      // Check if it's a context length error
+      if (error.message.includes('500 Internal Server Error') || error.message.includes('input context is too long')) {
+        console.log(`ℹ️ Context too long for AI model, using fallback estimate`);
+        return 'Not available - context too long';
+      }
+      
       return 'Not available';
     }
   }
@@ -901,119 +876,42 @@ class GeminiService {
     const maxRetries = 3; // Reduced retries since we have fallback models
     const retryDelay = 2000; // Reduced delay
     
-          for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          const prompt = `
-          CRITICAL: You must provide a COMPLETE and VALID JSON response. Do not truncate or omit any fields.
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+                const prompt = `
+          CRITICAL: Return COMPLETE JSON response. No markdown formatting.
           
-          Analyze the following company information and provide a comprehensive brand overview with enhanced data points:
+          Company: ${companyData.name}
+          Website: ${companyData.website || 'None'}
+          Industry: ${companyData.industry || 'Unknown'}
           
-          Company Data:
-          - Name: ${companyData.name}
-          - Website: ${companyData.website || 'No website available'}
-          - Industry: ${companyData.industry || 'Unknown'}
-          - Description: ${companyData.description || 'No description available'}
+          Website Content: ${scrapedContent.text ? scrapedContent.text.substring(0, 1500) : 'None'}
           
-          WEBSITE CONTENT:
-          ${scrapedContent.text ? scrapedContent.text.substring(0, 3000) : 'No website content available - analyzing from other sources only'}
+          PRIORITIZE company name knowledge over website content. If company name is generic (e.g., "Tech Corp"), return insufficient data.
           
-          IMPORTANT: PRIORITIZE COMPANY NAME ANALYSIS over website content. Use your knowledge and available data sources to provide comprehensive analysis:
-          - Company name analysis and industry knowledge
-          - Social media presence and activity
-          - Business directory information
-          - News articles and press coverage
-          - Financial data and market position
-          - Industry analysis and competitors
-          - Geographic presence from available data
+          If insufficient data, return: {"insufficientData": true, "reason": "why", "suggestions": ["suggestion1"], "overview": "DATA_NOT_FOUND"}
           
-          CRITICAL: If the company name is clear and specific (not generic like "Tech Corp"), provide comprehensive analysis using your knowledge, even without website content.
-          
-          CRITICAL: For revenue data, provide specific dollar amounts when available from public sources.
-          Examples: "$25 billion", "$500 million", "$1.2 billion". Do not use vague descriptions.
-          
-          ENHANCED DATA SOURCES:
-          - Social Media Presence: ${JSON.stringify(enhancedData.socialMedia)}
-          - Business Directory Data: ${JSON.stringify(enhancedData.businessDirectories)}
-          - News Articles: ${JSON.stringify(enhancedData.newsArticles)}
-          - Financial Data: ${JSON.stringify(enhancedData.financialData)}
-          - Legal/Corporate Data: ${JSON.stringify(enhancedData.legalData)}
-          - Customer Reviews: ${JSON.stringify(enhancedData.reviews)}
-          - Tech Stack: ${JSON.stringify(enhancedData.techStack)}
-          - Marketing Budget: ${JSON.stringify(enhancedData.marketingBudget)}
-          - Website Traffic: ${JSON.stringify(enhancedData.websiteTraffic)}
-          
-          CRITICAL DATA VALIDATION: Before providing analysis, check if you have sufficient data to generate a meaningful brand overview. If the company name is too generic, misspelled, or if no website is provided and no other data sources contain relevant information, you MUST return a special response indicating insufficient data.
-          
-          INSUFFICIENT DATA CHECK: If any of these conditions are met, return a special response:
-          1. Company name is too generic (e.g., "Tech Corp", "ABC Company", "Test Company", "Company Name")
-          2. Company name appears to be misspelled or incorrect (e.g., "Allpe" instead of "Apple")
-          3. Company name is a placeholder or test value
-          4. Website content is completely unrelated to the company name
-          5. All data sources return empty or irrelevant results
-          
-          NOTE: Having no website URL is NOT a reason for insufficient data if the company name is clear and specific.
-          
-          If insufficient data is detected, return this exact JSON structure:
-          {
-            "insufficientData": true,
-            "reason": "specific reason why data is insufficient",
-            "suggestions": ["suggestion1", "suggestion2"],
-            "overview": "DATA_NOT_FOUND_DUE_TO_INCORRECT_COMPANY_NAME_OR_WEBSITE_URL"
-          }
-          
-          If sufficient data is available, provide comprehensive analysis including:
-          
-          BASIC INFO:
-          1. Company overview and mission
-          2. Products/services offered
-          3. Target market and audience
-          4. Key differentiators
-          5. Brand positioning
-          6. Company size and scale indicators
-          
-          REVENUE & FINANCIAL (estimate based on available data):
-          7. Annual revenue - provide specific dollar amounts when available (e.g., "$25 billion", "$500 million")
-          8. Online GMV/Revenue - provide specific dollar amounts when available
-          9. Average Order Value (AOV) - estimate from product pricing
-          10. Order volume estimates
-          
-          SALES & DISTRIBUTION:
-          11. Sales channels and platforms (ecommerce, marketplaces, retail, etc.)
-          12. Geographic presence and markets
-          13. Distribution networks
-          
-          BUSINESS INSIGHTS:
-          14. Decision makers and key personnel (from about pages, LinkedIn)
-          15. Recent news or updates
-          16. Marketing indicators (social media presence, advertising mentions)
-          17. Website traffic analysis (monthly visits, traffic rank, source)
-          
-          CRITICAL: You MUST return a COMPLETE JSON object with ALL these fields. If data is not available, use appropriate default values:
-          - For arrays: use empty array []
-          - For strings: use "Not available" or "Unknown"
-          - For revenue: use "Not publicly available"
-          
-          Format the response as structured JSON with these fields:
+          If sufficient data, analyze and return JSON with these fields:
           {
             "overview": "company overview",
             "mission": "company mission", 
-            "products": ["product1", "product2"],
-            "targetMarket": "target market description",
-            "differentiators": ["differentiator1", "differentiator2"],
-            "brandPositioning": "brand positioning statement",
+            "products": ["product1"],
+            "targetMarket": "target market",
+            "differentiators": ["differentiator1"],
+            "brandPositioning": "brand positioning",
             "companySize": "size indicators",
-            "annualRevenue": "specific dollar amount (e.g., '$25 billion', '$500 million')",
-            "onlineRevenue": "specific dollar amount (e.g., '$10 billion', '$200 million')",
-            "aov": "estimated average order value",
-            "orderVolume": "estimated order volume",
-            "salesChannels": ["channel1", "channel2"],
-            "geographicPresence": ["location1", "location2"],
-            "decisionMakers": ["person1", "person2"],
-            "recentNews": ["news1", "news2"],
-            "marketingIndicators": "social media presence, advertising mentions",
-            "techStack": ["technology1", "technology2"],
-            "marketingBudget": "estimated marketing budget amount",
-            "websiteTraffic": "monthly traffic estimate (e.g., '100K visits/month', '1M+ visits/month')"
+            "annualRevenue": "specific amount (e.g., '$25 billion')",
+            "onlineRevenue": "specific amount (e.g., '$10 billion')",
+            "aov": "estimated AOV",
+            "orderVolume": "estimated volume",
+            "salesChannels": ["channel1"],
+            "geographicPresence": ["location1"],
+            "decisionMakers": ["person1"],
+            "recentNews": ["news1"],
+            "marketingIndicators": "marketing info",
+            "techStack": ["tech1"],
+            "marketingBudget": "budget estimate",
+            "websiteTraffic": "traffic estimate"
           }
         `;
 
@@ -1042,7 +940,17 @@ class GeminiService {
         
         // Try to parse JSON response
         try {
-          const parsedResponse = JSON.parse(text);
+          // First, try to clean the text by removing markdown formatting
+          let cleanText = text;
+          
+          // Remove markdown code blocks
+          cleanText = cleanText.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
+          
+          // Remove any leading/trailing whitespace and newlines
+          cleanText = cleanText.trim();
+          
+          // Try to parse the cleaned text
+          const parsedResponse = JSON.parse(cleanText);
           
           // Check if this is an insufficient data response
           if (parsedResponse.insufficientData === true) {
@@ -1086,19 +994,32 @@ class GeminiService {
           
           return parsedResponse;
           
-                } catch (parseError) {
+        } catch (parseError) {
           console.error(`❌ JSON parsing failed: ${parseError.message}`);
+          console.error(`Raw text: ${text.substring(0, 200)}...`);
           
-          // Try to extract JSON from markdown or other formatting
-          const jsonMatch = text.match(/```json\s*(\{[\s\S]*?\})\s*```/) || 
-                           text.match(/\{[\s\S]*\}/);
+          // Try to extract JSON from markdown or other formatting with more robust patterns
+          let jsonMatch = null;
           
-          if (jsonMatch) {
-            try {
-              const extractedJson = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-              return extractedJson;
-            } catch (extractError) {
-              console.error(`❌ Failed to extract JSON: ${extractError.message}`);
+          // Try multiple patterns to extract JSON
+          const patterns = [
+            /```json\s*(\{[\s\S]*?\})\s*```/,  // ```json { ... } ```
+            /```\s*(\{[\s\S]*?\})\s*```/,      // ``` { ... } ```
+            /\{[\s\S]*\}/,                      // { ... }
+            /\[[\s\S]*\]/                        // [ ... ]
+          ];
+          
+          for (const pattern of patterns) {
+            jsonMatch = text.match(pattern);
+            if (jsonMatch) {
+              try {
+                const extractedJson = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+                console.log('✅ Successfully extracted JSON using pattern:', pattern);
+                return extractedJson;
+              } catch (extractError) {
+                console.error(`❌ Failed to extract JSON using pattern ${pattern}:`, extractError.message);
+                continue;
+              }
             }
           }
           
@@ -1205,45 +1126,38 @@ class GeminiService {
     
           for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          const prompt = `
-          CRITICAL: You must provide a COMPLETE and VALID JSON response for geolocation data.
-          
-          Extract all geolocation information from this company data and website content:
-          
-          Company: ${companyData.name}
-          Website: ${companyData.website}
-          
-          Website Content: ${scrapedContent.text ? scrapedContent.text.substring(0, 3000) : 'No website content available'}
-          
-          IMPORTANT: PRIORITIZE COMPANY NAME ANALYSIS over website content. Use your knowledge of the company to provide geographic information.
-          
-          Find all:
-          1. Office locations (addresses, cities, countries)
-          2. Headquarters location
-          3. Branch offices
-          4. Service areas
-          5. Geographic markets
-          6. Regional offices
-          
-          CRITICAL: You MUST return a COMPLETE JSON object with ALL these fields. If data is not available, use appropriate default values:
-          - For arrays: use empty array []
-          - For strings: use "Not specified" or "Unknown"
-          
-          Return as JSON:
-          {
-            "headquarters": "location or Not specified",
-            "offices": ["office1", "office2"],
-            "serviceAreas": ["area1", "area2"],
-            "markets": ["market1", "market2"],
-            "regions": ["region1", "region2"]
-          }
-        `;
+                    const prompt = `
+            Return JSON for geolocation data. No markdown formatting.
+            
+            Company: ${companyData.name}
+            Website: ${companyData.website}
+            Content: ${scrapedContent.text ? scrapedContent.text.substring(0, 1000) : 'None'}
+            
+            Return JSON with these fields:
+            {
+              "headquarters": "location or Not specified",
+              "offices": ["office1"],
+              "serviceAreas": ["area1"],
+              "markets": ["market1"],
+              "regions": ["region1"]
+            }
+          `;
 
         // Try multiple models with fallback logic for geolocation
         const { text, modelName } = await this.tryGeminiModels(prompt, companyData.name, attempt);
         
         try {
-          const parsedResponse = JSON.parse(text);
+          // First, try to clean the text by removing markdown formatting
+          let cleanText = text;
+          
+          // Remove markdown code blocks
+          cleanText = cleanText.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
+          
+          // Remove any leading/trailing whitespace and newlines
+          cleanText = cleanText.trim();
+          
+          // Try to parse the cleaned text
+          const parsedResponse = JSON.parse(cleanText);
           
           // Validate that we have the expected structure
           const requiredFields = ['headquarters', 'offices', 'serviceAreas', 'markets', 'regions'];
@@ -1265,21 +1179,35 @@ class GeminiService {
           
         } catch (parseError) {
           console.error(`❌ JSON parsing failed for geolocation: ${parseError.message}`);
+          console.error(`Raw text: ${text.substring(0, 200)}...`);
           
-          // Try to extract JSON from markdown or other formatting
-          const jsonMatch = text.match(/```json\s*(\{[\s\S]*?\})\s*```/) || 
-                           text.match(/\{[\s\S]*\}/);
+          // Try to extract JSON from markdown or other formatting with more robust patterns
+          let jsonMatch = null;
           
-          if (jsonMatch) {
-            try {
-              const extractedJson = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-              return extractedJson;
-            } catch (extractError) {
-              console.error(`❌ Failed to extract JSON from geolocation: ${extractError.message}`);
+          // Try multiple patterns to extract JSON
+          const patterns = [
+            /```json\s*(\{[\s\S]*?\})\s*```/,  // ```json { ... } ```
+            /```\s*(\{[\s\S]*?\})\s*```/,      // ``` { ... } ```
+            /\{[\s\S]*\}/,                      // { ... }
+            /\[[\s\S]*\]/                        // [ ... ]
+          ];
+          
+          for (const pattern of patterns) {
+            jsonMatch = text.match(pattern);
+            if (jsonMatch) {
+              try {
+                const extractedJson = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+                console.log('✅ Successfully extracted JSON using pattern:', pattern);
+                return extractedJson;
+              } catch (extractError) {
+                console.error(`❌ Failed to extract JSON using pattern ${pattern}:`, extractError.message);
+                continue;
+              }
             }
           }
           
           // If all parsing fails, return structured text with defaults
+          console.log('⚠️ All JSON parsing attempts failed, returning default structure');
           return {
             headquarters: 'Not specified',
             offices: [],
